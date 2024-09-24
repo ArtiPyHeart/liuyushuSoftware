@@ -1,0 +1,656 @@
+import os
+import re
+import sys
+import time
+import tkinter as tk
+import winreg
+from ast import literal_eval
+from textwrap import dedent
+from threading import Thread
+from tkinter import colorchooser, filedialog, font, messagebox, simpledialog, ttk
+from tkinter.scrolledtext import ScrolledText
+
+import markdown
+import openai  # 导入 openai 库
+import pypinyin
+from tkhtmlview import HTMLLabel
+
+# Example usage of pypinyin
+text = "你好"
+pinyin = pypinyin.pinyin(text, style=pypinyin.NORMAL)
+print(pinyin)
+
+
+class MyNotepad:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("刘胖子的记事本 v2.0")  # 修改程序窗口标题
+        self.filename = None
+        self.text_changed = False
+        self.wrap_mode = tk.NONE
+        self.font_size = 12
+        self.font_family = "SimSun"  # 默认使用宋体
+        self.font_color = "black"  # 默认字体颜色
+        self.markdown_mode = False  # 添加Markdown模式标志
+
+        # 设置窗口的初始大小
+        self.root.geometry("800x600")
+
+        # 创建倒计时框架
+        self.create_countdown_frame()
+
+        # 创建文本区域
+        self.text_area = ScrolledText(
+            root,
+            undo=True,
+            wrap=self.wrap_mode,
+            font=(self.font_family, self.font_size),
+        )
+        self.text_area.pack(fill=tk.BOTH, expand=1)
+        self.text_area.bind("<<Modified>>", self.on_text_change)
+        self.text_area.bind("<Button-1>", self.update_status_bar)
+        self.text_area.bind("<Key>", self.update_status_bar)
+
+        # 创建HTML预览区域
+        self.preview_area = HTMLLabel(root, html="")
+        self.preview_area.pack(fill=tk.BOTH, expand=1)
+        self.preview_area.pack_forget()  # 初始时隐藏预览区域
+
+        # 增加右侧滑动条长度
+        self.text_area.vbar.config(width=24)  # 增加滑动条宽度，间接增加长度
+
+        # 创建菜单
+        self.create_menu()
+
+        # 创建状态栏
+        self.status_bar = tk.Label(root, text="行: 1, 列: 1 | 总字数: 0", anchor="w")
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 默认编码
+        self.encoding = "utf-8"
+
+        # 添加到右键菜单
+        self.add_to_context_menu()
+
+        # 绑定快捷键
+        self.root.bind("<Control-bracketleft>", self.increase_font_size)
+        self.root.bind("<Control-bracketright>", self.decrease_font_size)
+
+        # 设置Markdown支持
+        self.setup_markdown_support()
+
+        # # 加载错别字词典
+        # self.load_typo_dict()
+
+        # 设置 OpenAI API Key 和 Base URL
+        self.api_key = None
+        self.base_url = None
+        self.model_name = None  # 添加模型名称
+        self.setup_openai()
+
+    def setup_openai(self):
+        self.api_key = simpledialog.askstring("API Key", "请输入大模型 API Key：")
+        self.base_url = simpledialog.askstring("Base URL", "请输入大模型 Base URL：")
+        self.model_name = simpledialog.askstring(
+            "模型名称", "请输入大模型名称："
+        )  # 添加输入框让用户指定模型名称
+        self.openai_client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+        # def load_typo_dict(self):
+        # 加载一个更全面的错别字词典
+        self.typo_dict = {
+            "的": "得地",
+            "得": "的地",
+            "地": "的得",
+            "哪": "那",
+            "那": "哪",
+            "它": "他她",
+            "他": "它她",
+            "她": "它他",
+            "在": "再",
+            "再": "在",
+            "与": "于",
+            "于": "与",
+            "或": "或者",
+            "而": "二",
+            "二": "而",
+            "以": "已",
+            "已": "以",
+            "吗": "嘛",
+            "嘛": "吗",
+            "却": "确",
+            "确": "却",
+            "象": "像",
+            "像": "象",
+            "此": "次",
+            "次": "此",
+            "话": "划",
+            "划": "话",
+            "系": "系统",
+            "统": "统一",
+            "性": "型",
+            "型": "性",
+            "才": "材",
+            "材": "才",
+            "华": "花",
+            "花": "华",
+            "发": "发展",
+            "展": "展开",
+            "处": "处理",
+            "理": "理解",
+        }
+
+    def check_typos(self):
+        content = self.text_area.get("1.0", tk.END)
+        response = self.openai_client.chat.completions.create(
+            model=self.model_name,  # 使用用户指定的模型名称
+            messages=[
+                {"role": "system", "content": "你是一个错别字检查助手。"},
+                {
+                    "role": "user",
+                    "content": dedent(
+                        f"""
+                    请检查以下文本中的错别字并给出正确的结果：\n\n{content}
+                    你应该返回一个标准的python字典，key是错别字，value是正确的字。如：
+                    {{
+                        "错别字1": "正确字1",
+                        "错别字2": "正确字2",
+                        ...
+                    }}
+                    除了返回字典，不要返回任何其他内容。
+                    如果文本中没有错别字，请返回一个空字典。
+                    现在请开始检查：
+                    """
+                    ),
+                },
+            ],
+            max_tokens=1024,
+            n=1,
+            stop=None,
+            temperature=0.5,
+        )
+        corrected_text = response.choices[0].message.content.strip()
+
+        self.text_area.tag_remove("typo", "1.0", tk.END)
+
+        # 高亮错别字
+        typo_dict = literal_eval(corrected_text)
+        for word in typo_dict:
+            start = "1.0"
+            while True:
+                start = self.text_area.search(word, start, stopindex=tk.END)
+                if not start:
+                    break
+                end = f"{start}+{len(word)}c"
+                self.text_area.tag_add("typo", start, end)
+                start = end
+
+        self.text_area.tag_config("typo", background="yellow", foreground="red")
+
+        messagebox.showinfo(
+            "检查结果", f"原文：\n{content}\n\n纠正：\n{corrected_text}"
+        )
+
+    def setup_markdown_support(self):
+        # 添加Markdown语法高亮
+        self.text_area.tag_configure(
+            "header", foreground="blue", font=(self.font_family, self.font_size, "bold")
+        )
+        self.text_area.tag_configure(
+            "bold", font=(self.font_family, self.font_size, "bold")
+        )
+        self.text_area.tag_configure(
+            "italic", font=(self.font_family, self.font_size, "italic")
+        )
+        self.text_area.tag_configure("code", foreground="green")
+        self.text_area.tag_configure("link", foreground="blue", underline=1)
+        self.text_area.tag_configure(
+            "typo", background="yellow", foreground="red"
+        )  # 修改错别字标记样式
+
+        # 绑定按键事件以实时更新Markdown语法高亮
+        self.text_area.bind("<KeyRelease>", self.update_markdown_syntax)
+
+    def update_markdown_syntax(self, event=None):
+        if self.markdown_mode:
+            content = self.text_area.get("1.0", tk.END)
+            self.text_area.tag_remove("header", "1.0", tk.END)
+            self.text_area.tag_remove("bold", "1.0", tk.END)
+            self.text_area.tag_remove("italic", "1.0", tk.END)
+            self.text_area.tag_remove("code", "1.0", tk.END)
+            self.text_area.tag_remove("link", "1.0", tk.END)
+
+            # 高亮标题
+            for match in re.finditer(r"^#+\s.*$", content, re.MULTILINE):
+                start, end = match.span()
+                self.text_area.tag_add("header", f"1.0+{start}c", f"1.0+{end}c")
+
+            # 高亮粗体
+            for match in re.finditer(r"\*\*.*?\*\*", content):
+                start, end = match.span()
+                self.text_area.tag_add("bold", f"1.0+{start}c", f"1.0+{end}c")
+
+            # 高亮斜体
+            for match in re.finditer(r"\*.*?\*", content):
+                start, end = match.span()
+                self.text_area.tag_add("italic", f"1.0+{start}c", f"1.0+{end}c")
+
+            # 高亮代码
+            for match in re.finditer(r"`.*?`", content):
+                start, end = match.span()
+                self.text_area.tag_add("code", f"1.0+{start}c", f"1.0+{end}c")
+
+            # 高亮链接
+            for match in re.finditer(r"\[.*?\]\(.*?\)", content):
+                start, end = match.span()
+                self.text_area.tag_add("link", f"1.0+{start}c", f"1.0+{end}c")
+
+            # 自动更新预览
+            self.update_markdown_preview()
+
+    def toggle_markdown_mode(self):
+        self.markdown_mode = not self.markdown_mode
+        if self.markdown_mode:
+            messagebox.showinfo("Markdown模式", "已切换到Markdown模式")
+            self.preview_markdown()  # 自动显示预览
+        else:
+            messagebox.showinfo("普通模式", "已切换到普通模式")
+            self.preview_area.pack_forget()  # 隐藏预览区域
+            self.text_area.pack(fill=tk.BOTH, expand=1)  # 恢复文本区域大小
+        self.update_markdown_syntax()
+
+    def preview_markdown(self):
+        if not self.markdown_mode:
+            messagebox.showwarning("警告", "请先切换到Markdown模式")
+            return
+        content = self.text_area.get("1.0", tk.END)
+        html = markdown.markdown(content)
+        self.preview_area.set_html(html)
+        self.preview_area.pack(side=tk.RIGHT, fill=tk.BOTH, expand=1)
+        self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+
+    def update_markdown_preview(self):
+        if self.markdown_mode:
+            content = self.text_area.get("1.0", tk.END)
+            html = markdown.markdown(content)
+            self.preview_area.set_html(html)
+            if not self.preview_area.winfo_ismapped():
+                self.preview_area.pack(side=tk.RIGHT, fill=tk.BOTH, expand=1)
+                self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+
+    def insert_markdown_header(self):
+        self.text_area.insert(tk.INSERT, "# ")
+        self.update_markdown_syntax()
+
+    def insert_markdown_bold(self):
+        self.text_area.insert(tk.INSERT, "**粗体文本**")
+        self.update_markdown_syntax()
+
+    def insert_markdown_italic(self):
+        self.text_area.insert(tk.INSERT, "*斜体文本*")
+        self.update_markdown_syntax()
+
+    def insert_markdown_code(self):
+        self.text_area.insert(tk.INSERT, "`代码`")
+        self.update_markdown_syntax()
+
+    def insert_markdown_link(self):
+        self.text_area.insert(tk.INSERT, "[链接文本](https://example.com)")
+        self.update_markdown_syntax()
+
+    def create_countdown_frame(self):
+        self.countdown_frame = tk.Frame(self.root)
+        self.countdown_frame.pack(side=tk.TOP, fill=tk.X)
+
+        # 小时选择器
+        self.hour_var = tk.StringVar(value="0")
+        hour_spinner = ttk.Spinbox(
+            self.countdown_frame, from_=0, to=23, width=3, textvariable=self.hour_var
+        )
+        hour_spinner.pack(side=tk.LEFT)
+        tk.Label(self.countdown_frame, text="时").pack(side=tk.LEFT)
+
+        # 分钟选择器
+        self.minute_var = tk.StringVar(value="0")
+        minute_spinner = ttk.Spinbox(
+            self.countdown_frame, from_=0, to=59, width=3, textvariable=self.minute_var
+        )
+        minute_spinner.pack(side=tk.LEFT)
+        tk.Label(self.countdown_frame, text="分").pack(side=tk.LEFT)
+
+        # 开始按钮
+        start_button = tk.Button(
+            self.countdown_frame, text="开始倒计时", command=self.start_countdown
+        )
+        start_button.pack(side=tk.LEFT, padx=5)
+
+        # 倒计时标签
+        self.countdown_label = tk.Label(self.countdown_frame, text="00:00:00")
+        self.countdown_label.pack(side=tk.LEFT, padx=5)
+
+    def start_countdown(self):
+        hours = int(self.hour_var.get())
+        minutes = int(self.minute_var.get())
+        total_seconds = hours * 3600 + minutes * 60
+
+        def countdown():
+            nonlocal total_seconds
+            while total_seconds > 0:
+                hours, remainder = divmod(total_seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                self.countdown_label.config(text=time_str)
+                time.sleep(1)
+                total_seconds -= 1
+            self.save_and_exit()
+
+        Thread(target=countdown, daemon=True).start()
+
+    def save_and_exit(self):
+        self.save_file()
+        self.root.quit()
+
+    def create_menu(self):
+        menu_bar = tk.Menu(self.root)
+        self.root.config(menu=menu_bar)
+
+        # 文件菜单
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="新建", command=self.new_file)
+        file_menu.add_command(label="打开", command=self.open_file)
+        file_menu.add_command(label="保存", command=self.save_file)
+        file_menu.add_command(label="另存为", command=self.save_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="打印", command=self.print_file)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.exit_app)
+
+        # 编辑菜单
+        edit_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="编辑", menu=edit_menu)
+        edit_menu.add_command(label="撤销", command=self.text_area.edit_undo)
+        edit_menu.add_command(label="重做", command=self.text_area.edit_redo)
+        edit_menu.add_separator()
+        edit_menu.add_command(
+            label="剪切", command=lambda: self.text_area.event_generate("<<Cut>>")
+        )
+        edit_menu.add_command(
+            label="复制", command=lambda: self.text_area.event_generate("<<Copy>>")
+        )
+        edit_menu.add_command(
+            label="粘贴", command=lambda: self.text_area.event_generate("<<Paste>>")
+        )
+        edit_menu.add_separator()
+        edit_menu.add_command(label="查找", command=self.find_text)
+        edit_menu.add_command(label="替换", command=self.replace_text)
+
+        # 格式菜单
+        format_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="格式", menu=format_menu)
+        format_menu.add_checkbutton(label="自动换行", command=self.toggle_wrap_mode)
+        format_menu.add_command(label="选择编码", command=self.select_encoding)
+        format_menu.add_command(label="调整字体大小", command=self.change_font_size)
+        format_menu.add_command(label="选择字体", command=self.show_font_selector)
+        format_menu.add_command(label="字体颜色", command=self.choose_font_color)
+
+        # 查看菜单
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="查看", menu=view_menu)
+        self.show_status_bar = tk.BooleanVar()
+        self.show_status_bar.set(True)
+        view_menu.add_checkbutton(
+            label="状态栏",
+            onvalue=1,
+            offvalue=0,
+            variable=self.show_status_bar,
+            command=self.toggle_status_bar,
+        )
+
+        # 帮助菜单
+        help_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="关于", command=self.show_about)
+
+        # Markdown菜单
+        markdown_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Markdown", menu=markdown_menu)
+        markdown_menu.add_command(
+            label="切换Markdown模式", command=self.toggle_markdown_mode
+        )
+        markdown_menu.add_command(label="插入标题", command=self.insert_markdown_header)
+        markdown_menu.add_command(label="插入粗体", command=self.insert_markdown_bold)
+        markdown_menu.add_command(label="插入斜体", command=self.insert_markdown_italic)
+        markdown_menu.add_command(label="插入代码", command=self.insert_markdown_code)
+        markdown_menu.add_command(label="插入链接", command=self.insert_markdown_link)
+
+        # 检查错别字菜单
+        menu_bar.add_command(label="检查错别字", command=self.check_typos)
+
+    def new_file(self):
+        if self.text_changed:
+            self.ask_save_changes()
+        self.text_area.delete(1.0, tk.END)
+        self.filename = None
+        self.root.title("记事本")
+
+    def open_file(self):
+        if self.text_changed:
+            self.ask_save_changes()
+        self.filename = filedialog.askopenfilename(
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+        )
+        if self.filename:
+            self.text_area.delete(1.0, tk.END)
+            with open(self.filename, "r", encoding=self.encoding) as file:
+                self.text_area.insert(tk.END, file.read())
+            self.root.title(f"记事本 - {os.path.basename(self.filename)}")
+            self.text_changed = False
+
+    def save_file(self):
+        if self.filename:
+            self._save_to_file(self.filename)
+        else:
+            self.save_as()
+
+    def save_as(self):
+        self.filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+        )
+        if self.filename:
+            self._save_to_file(self.filename)
+            self.root.title(f"记事本 - {os.path.basename(self.filename)}")
+            self.text_changed = False
+
+    def _save_to_file(self, filename):
+        try:
+            content = self.text_area.get(1.0, tk.END)
+            with open(filename, "w", encoding=self.encoding) as file:
+                file.write(content)
+            self.text_changed = False
+        except Exception as e:
+            messagebox.showerror("错误", f"保存文件时发生错误: {e}")
+
+    def ask_save_changes(self):
+        response = messagebox.askyesnocancel("保存更改", "文件已修改，是否保存更改？")
+        if response:
+            self.save_file()
+        elif response is None:
+            return
+
+    def exit_app(self):
+        if self.text_changed:
+            self.ask_save_changes()
+        self.root.quit()
+
+    def on_text_change(self, event=None):
+        self.text_changed = self.text_area.edit_modified()
+        self.text_area.edit_modified(False)
+        self.update_status_bar()
+        if self.markdown_mode:
+            self.update_markdown_preview()
+
+    def update_status_bar(self, event=None):
+        if self.show_status_bar.get():
+            line, column = self.text_area.index(tk.INSERT).split(".")
+            content = self.text_area.get(1.0, tk.END)
+            total_count = len(content) - 1  # 减去最后的换行符
+            self.status_bar.config(
+                text=f"行: {line}, 列: {int(column)+1} | 总字数: {total_count}"
+            )
+
+    def toggle_status_bar(self):
+        if self.show_status_bar.get():
+            self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        else:
+            self.status_bar.pack_forget()
+
+    def find_text(self):
+        find_str = simpledialog.askstring("查找", "请输入要查找的内容：")
+        if find_str:
+            start_pos = "1.0"
+            self.text_area.tag_remove("highlight", "1.0", tk.END)
+            while True:
+                start_pos = self.text_area.search(find_str, start_pos, stopindex=tk.END)
+                if not start_pos:
+                    break
+                end_pos = f"{start_pos}+{len(find_str)}c"
+                self.text_area.tag_add("highlight", start_pos, end_pos)
+                self.text_area.tag_config("highlight", background="yellow")
+                start_pos = end_pos
+
+    def replace_text(self):
+        find_str = simpledialog.askstring("替换", "请输入要查找的内容：")
+        replace_str = simpledialog.askstring("替换", "请输入替换后的内容：")
+        if find_str is not None and replace_str is not None:
+            content = self.text_area.get(1.0, tk.END)
+            new_content = content.replace(find_str, replace_str)
+            self.text_area.delete(1.0, tk.END)
+            self.text_area.insert(1.0, new_content)
+
+    def toggle_wrap_mode(self):
+        if self.wrap_mode == tk.NONE:
+            self.wrap_mode = tk.WORD
+        else:
+            self.wrap_mode = tk.NONE
+        self.text_area.config(wrap=self.wrap_mode)
+
+    def select_encoding(self):
+        encodings = ["utf-8", "utf-16", "gbk", "ansi"]
+        encoding = simpledialog.askstring(
+            "选择编码",
+            f"请输入编码格式（可选：{', '.join(encodings)}）：",
+            initialvalue=self.encoding,
+        )
+        if encoding in encodings:
+            self.encoding = encoding
+        else:
+            messagebox.showwarning("警告", "不支持的编码格式")
+
+    def print_file(self):
+        # 简单地弹出一个消息框，实际的打印功能需要调用操作系统的打印服务
+        messagebox.showinfo("打印", "打印功能尚未实现")
+
+    def show_about(self):
+        messagebox.showinfo(
+            "关于", "这是一个使用 Python Tkinter 编写的简易记事本应用程序。"
+        )
+
+    def add_to_context_menu(self):
+        try:
+            # 获取当前用户的注册表路径
+            key_path = r"Software\Classes\.mytxtfile"
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+            winreg.SetValue(key, "", winreg.REG_SZ, "MyTxtFile")
+
+            # 设置在"新建"菜单中显示
+            shell_new_key_path = r"Software\Classes\.mytxtfile\MyTxtFile\ShellNew"
+            shell_new_key = winreg.CreateKey(
+                winreg.HKEY_CURRENT_USER, shell_new_key_path
+            )
+            winreg.SetValueEx(shell_new_key, "NullFile", 0, winreg.REG_SZ, "")
+
+            # 关联文件扩展名与应用程序
+            app_key_path = r"Software\Classes\MyTxtFile\shell\open\command"
+            app_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_key_path)
+            exe_path = sys.executable.replace("\\", "\\\\")
+            winreg.SetValue(app_key, "", winreg.REG_SZ, f'"{exe_path}" "%1"')
+
+            winreg.CloseKey(key)
+            winreg.CloseKey(shell_new_key)
+            winreg.CloseKey(app_key)
+        except Exception as e:
+            messagebox.showerror("错误", f"添加到右键菜单时发生错误: {e}")
+
+    def change_font_size(self):
+        new_size = simpledialog.askinteger(
+            "调整字体大小", "请输入新的字体大小：", initialvalue=self.font_size
+        )
+        if new_size:
+            self.set_font_size(new_size)
+
+    def set_font_size(self, new_size):
+        self.font_size = new_size
+        current_font = font.Font(font=self.text_area["font"])
+        current_font.configure(size=self.font_size)
+        self.text_area.configure(font=current_font)
+        self.update_status_bar()  # 更新状态栏，确保字体放大时不会消失
+        self.root.update_idletasks()  # 强制更新GUI，确保状态栏显示正确
+
+    def increase_font_size(self, event=None):
+        self.set_font_size(self.font_size + 1)
+
+    def decrease_font_size(self, event=None):
+        if self.font_size > 1:
+            self.set_font_size(self.font_size - 1)
+
+    def show_font_selector(self):
+        font_selector = tk.Toplevel(self.root)
+        font_selector.title("选择字体")
+        font_selector.geometry("300x400")
+
+        font_families = [
+            "SimSun",
+            "SimHei",
+            "KaiTi",
+            "FangSong",
+            "Arial",
+            "Times New Roman",
+            "Courier New",
+        ]
+        font_listbox = tk.Listbox(font_selector)
+        for family in font_families:
+            font_listbox.insert(tk.END, family)
+        font_listbox.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(
+            font_selector, orient="vertical", command=font_listbox.yview
+        )
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        font_listbox.config(yscrollcommand=scrollbar.set)
+
+        def on_select(event):
+            selected_index = font_listbox.curselection()
+            if selected_index:
+                new_family = font_listbox.get(selected_index[0])
+                self.font_family = new_family
+                current_font = font.Font(font=self.text_area["font"])
+                current_font.configure(family=self.font_family)
+                self.text_area.configure(font=current_font)
+                font_selector.destroy()
+
+        font_listbox.bind("<<ListboxSelect>>", on_select)
+
+    def choose_font_color(self):
+        color = colorchooser.askcolor(title="选择字体颜色")
+        if color[1]:
+            self.font_color = color[1]
+            self.text_area.config(fg=self.font_color)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MyNotepad(root)
+    root.mainloop()
